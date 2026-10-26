@@ -16,7 +16,7 @@
 :root {
   --bg: #eff0f1; --dot: #d1d5d9; --surface: #ffffff; --surface-2: #f7f8f9;
   --ink: #232629; --muted: #5f6a73; --line: #c3c7cb; --accent: #2980b9; --accent-ink: #ffffff;
-  --pu: 139,46,173; --hl: #8b2ead; --hl-soft: rgba(139,46,173,.12); --sus: #c45c00;
+  --pu: 139,46,173; --link: #1e8449; --hl: #8b2ead; --hl-soft: rgba(139,46,173,.12); --sus: #c45c00;
   --g-ru: #da4453; --g-cn: #d35400; --g-kp: #8e44ad; --g-ir: #1e8449; --g-ot: #2980b9;
   --g-rw: #c0306a; --g-cc: #a67c00; --g-sp: #a0399a; --g-ns: #7f8c8d; --g-nc: #7f8c8d;
   --f-display: "Noto Sans", "Segoe UI", system-ui, sans-serif;
@@ -28,14 +28,14 @@
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #141618; --dot: #2a2e32; --surface: #202326; --surface-2: #292c30;
   --ink: #fcfcfc; --muted: #a1a9b1; --line: #3b4045; --accent: #1d99f3; --accent-ink: #fcfcfc;
-  --pu: 139,46,173; --hl: #a24cc4; --hl-soft: rgba(162,76,196,.20); --sus: #f67400;
+  --pu: 139,46,173; --link: #2ecc71; --hl: #a24cc4; --hl-soft: rgba(162,76,196,.20); --sus: #f67400;
   --g-ru: #ed5e6b; --g-cn: #f67400; --g-kp: #b07fd8; --g-ir: #2ecc71; --g-ot: #1d99f3;
   --g-rw: #e93a9a; --g-cc: #fdbc4b; --g-sp: #d27ccb; --g-ns: #a1a9b1; --g-nc: #a1a9b1;
   --shadow: 0 1px 2px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.3); color-scheme: dark; } }
 :root[data-theme="dark"] {
   --bg: #141618; --dot: #2a2e32; --surface: #202326; --surface-2: #292c30;
   --ink: #fcfcfc; --muted: #a1a9b1; --line: #3b4045; --accent: #1d99f3; --accent-ink: #fcfcfc;
-  --pu: 139,46,173; --hl: #a24cc4; --hl-soft: rgba(162,76,196,.20); --sus: #f67400;
+  --pu: 139,46,173; --link: #2ecc71; --hl: #a24cc4; --hl-soft: rgba(162,76,196,.20); --sus: #f67400;
   --g-ru: #ed5e6b; --g-cn: #f67400; --g-kp: #b07fd8; --g-ir: #2ecc71; --g-ot: #1d99f3;
   --g-rw: #e93a9a; --g-cc: #fdbc4b; --g-sp: #d27ccb; --g-ns: #a1a9b1; --g-nc: #a1a9b1;
   --shadow: 0 1px 2px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.3); color-scheme: dark; }
@@ -72,6 +72,7 @@ a { color: var(--accent); }
 .world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
 .edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 .edges line { stroke: var(--hl); stroke-width: 2.5; stroke-dasharray: 6 5; opacity: .85; }
+.edges polyline { stroke: var(--link); stroke-width: 3; fill: none; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 
 .group { position: absolute; width: 1490px; padding: 18px 22px 24px; border-radius: var(--r-frame);
   background: color-mix(in srgb, var(--gc) 6%, transparent); border: 1.5px solid color-mix(in srgb, var(--gc) 35%, transparent); }
@@ -316,12 +317,41 @@ a.badge { color: var(--ink); }
 
   // ---------- selection + drawer
   let selected = null;
+  // Links: solid green line routed around cards (up to 3 bends); if no clear route exists, the old dashed straight line
+  const PAD = 4, OFF = 8, TURN = 40; // OFF = half the 16px card gap
+  function hits(p, q, o) { // Liang-Barsky: does segment p-q cross obstacle o (padded)?
+    const dx = q[0] - p[0], dy = q[1] - p[1]; let u0 = 0, u1 = 1;
+    for (const [pp, qq] of [[-dx, p[0] - o.l + PAD], [dx, o.r + PAD - p[0]], [-dy, p[1] - o.t + PAD], [dy, o.b + PAD - p[1]]]) {
+      if (pp === 0) { if (qq < 0) return false; continue; }
+      const u = qq / pp; if (pp < 0) { if (u > u1) return false; if (u > u0) u0 = u; } else { if (u < u0) return false; if (u < u1) u1 = u; }
+    }
+    return true;
+  }
+  function route(A, B, P, Q, obs) {
+    const xs = [], ys = []; [A, B, ...obs].forEach(o => { xs.push(o.l - OFF, o.r + OFF); ys.push(o.t - OFF, o.b + OFF); });
+    const [x1, y1] = P, [x2, y2] = Q, C = [[P, Q], [P, [x2, y1], Q], [P, [x1, y2], Q]];
+    xs.forEach(cx => C.push([P, [cx, y1], [cx, y2], Q]));
+    ys.forEach(cy => C.push([P, [x1, cy], [x2, cy], Q]));
+    [A.t - OFF, A.b + OFF].forEach(a => [B.t - OFF, B.b + OFF].forEach(b => xs.forEach(cx => C.push([P, [x1, a], [cx, a], [cx, b], [x2, b], Q]))));
+    [A.l - OFF, A.r + OFF].forEach(a => [B.l - OFF, B.r + OFF].forEach(b => ys.forEach(cy => C.push([P, [a, y1], [a, cy], [b, cy], [b, y2], Q]))));
+    const cost = pts => pts.reduce((n, p, i) => i ? n + Math.abs(p[0] - pts[i - 1][0]) + Math.abs(p[1] - pts[i - 1][1]) : n, 0) + TURN * (pts.length - 2);
+    const ok = pts => pts.every((p, i) => !i || !obs.some(o => hits(pts[i - 1], p, o)));
+    return C.map(pts => [cost(pts), pts]).sort((a, b) => a[0] - b[0]).find(([, pts]) => ok(pts))?.[1] || null;
+  }
   function drawEdges(id) {
     edges.innerHTML = ''; if (!id) return;
-    const wr = world.getBoundingClientRect(); const ctr = c => { const r = c.getBoundingClientRect(); return [(r.left - wr.left + r.width / 2) / s, (r.top - wr.top + r.height / 2) / s]; };
-    const [x1, y1] = ctr(cards[id]);
-    related(id).forEach(r => { const [x2, y2] = ctr(cards[r]); const l = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2); edges.appendChild(l); });
+    const wr = world.getBoundingClientRect(), NS = 'http://www.w3.org/2000/svg';
+    const box = el => { const r = el.getBoundingClientRect(); return { el, l: (r.left - wr.left) / s, t: (r.top - wr.top) / s, r: (r.right - wr.left) / s, b: (r.bottom - wr.top) / s }; };
+    const mid = b => [(b.l + b.r) / 2, (b.t + b.b) / 2];
+    const all = [...world.querySelectorAll('.card, .hub')].filter(e => e.offsetWidth).map(box);
+    const A = box(cards[id]), P = mid(A);
+    related(id).forEach(r => {
+      const B = box(cards[r]), Q = mid(B), pts = route(A, B, P, Q, all.filter(o => o.el !== A.el && o.el !== B.el));
+      const l = document.createElementNS(NS, pts ? 'polyline' : 'line');
+      if (pts) l.setAttribute('points', pts.map(p => p.join(',')).join(' '));
+      else { l.setAttribute('x1', P[0]); l.setAttribute('y1', P[1]); l.setAttribute('x2', Q[0]); l.setAttribute('y2', Q[1]); }
+      edges.appendChild(l);
+    });
   }
   function select(id) {
     selected = id; const rel = id ? new Set(related(id)) : new Set();
