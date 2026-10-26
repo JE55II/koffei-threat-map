@@ -317,8 +317,10 @@ a.badge { color: var(--ink); }
 
   // ---------- selection + drawer
   let selected = null;
-  // Links: solid green line routed around cards (up to 3 bends); if no clear route exists, the old dashed straight line
-  const PAD = 4, OFF = 8, TURN = 40; // OFF = half the 16px card gap
+  // Links: one port on the selected card, solid green lines routed through the gutters between group blocks
+  // (shortest orthogonal path on a sparse grid, Dijkstra with bend cost; later links reuse earlier segments).
+  // If no clear route exists, the old dashed straight line is drawn.
+  const PAD = 4, CG = 8, GG = 40, TURN = 60, W_OWN = 2, W_OTHER = 12, W_SHARED = 0.25; // CG/GG = half the card / group gaps
   function hits(p, q, o) { // Liang-Barsky: does segment p-q cross obstacle o (padded)?
     const dx = q[0] - p[0], dy = q[1] - p[1]; let u0 = 0, u1 = 1;
     for (const [pp, qq] of [[-dx, p[0] - o.l + PAD], [dx, o.r + PAD - p[0]], [-dy, p[1] - o.t + PAD], [dy, o.b + PAD - p[1]]]) {
@@ -327,29 +329,62 @@ a.badge { color: var(--ink); }
     }
     return true;
   }
-  function route(A, B, P, Q, obs) {
-    const xs = [], ys = []; [A, B, ...obs].forEach(o => { xs.push(o.l - OFF, o.r + OFF); ys.push(o.t - OFF, o.b + OFF); });
-    const [x1, y1] = P, [x2, y2] = Q, C = [[P, Q], [P, [x2, y1], Q], [P, [x1, y2], Q]];
-    xs.forEach(cx => C.push([P, [cx, y1], [cx, y2], Q]));
-    ys.forEach(cy => C.push([P, [x1, cy], [x2, cy], Q]));
-    [A.t - OFF, A.b + OFF].forEach(a => [B.t - OFF, B.b + OFF].forEach(b => xs.forEach(cx => C.push([P, [x1, a], [cx, a], [cx, b], [x2, b], Q]))));
-    [A.l - OFF, A.r + OFF].forEach(a => [B.l - OFF, B.r + OFF].forEach(b => ys.forEach(cy => C.push([P, [a, y1], [a, cy], [b, cy], [b, y2], Q]))));
-    const cost = pts => pts.reduce((n, p, i) => i ? n + Math.abs(p[0] - pts[i - 1][0]) + Math.abs(p[1] - pts[i - 1][1]) : n, 0) + TURN * (pts.length - 2);
-    const ok = pts => pts.every((p, i) => !i || !obs.some(o => hits(pts[i - 1], p, o)));
-    return C.map(pts => [cost(pts), pts]).sort((a, b) => a[0] - b[0]).find(([, pts]) => ok(pts))?.[1] || null;
-  }
+  const inside = (x, y, g) => x > g.l && x < g.r && y > g.t && y < g.b;
+  function heapPush(h, it) { h.push(it); let i = h.length - 1; while (i) { const j = (i - 1) >> 1; if (h[j][0] <= it[0]) break; h[i] = h[j]; i = j; } h[i] = it; }
+  function heapPop(h) { const top = h[0], last = h.pop(); if (h.length) { let i = 0; for (;;) { let c = 2 * i + 1; if (c >= h.length) break; if (c + 1 < h.length && h[c + 1][0] < h[c][0]) c++; if (h[c][0] >= last[0]) break; h[i] = h[c]; i = c; } h[i] = last; } return top; }
   function drawEdges(id) {
     edges.innerHTML = ''; if (!id) return;
     const wr = world.getBoundingClientRect(), NS = 'http://www.w3.org/2000/svg';
     const box = el => { const r = el.getBoundingClientRect(); return { el, l: (r.left - wr.left) / s, t: (r.top - wr.top) / s, r: (r.right - wr.left) / s, b: (r.bottom - wr.top) / s }; };
-    const mid = b => [(b.l + b.r) / 2, (b.t + b.b) / 2];
-    const all = [...world.querySelectorAll('.card, .hub')].filter(e => e.offsetWidth).map(box);
-    const A = box(cards[id]), P = mid(A);
-    related(id).forEach(r => {
-      const B = box(cards[r]), Q = mid(B), pts = route(A, B, P, Q, all.filter(o => o.el !== A.el && o.el !== B.el));
-      const l = document.createElementNS(NS, pts ? 'polyline' : 'line');
-      if (pts) l.setAttribute('points', pts.map(p => p.join(',')).join(' '));
-      else { l.setAttribute('x1', P[0]); l.setAttribute('y1', P[1]); l.setAttribute('x2', Q[0]); l.setAttribute('y2', Q[1]); }
+    const A = box(cards[id]), rel = related(id).map(r => box(cards[r]));
+    if (!rel.length) return;
+    const groups = [...world.querySelectorAll('.group, .hubs')].map(box);
+    const own = new Set([A, ...rel].map(c => groups.find(g => inside((c.l + c.r) / 2, (c.t + c.b) / 2, g))).filter(Boolean));
+    const obs = [...world.querySelectorAll('.card, .hub')].filter(e => e.offsetWidth).map(box);
+    const cx = c => (c.l + c.r) / 2, cy = c => (c.t + c.b) / 2;
+    const right = rel.reduce((n, c) => n + (cx(c) >= cx(A) ? 1 : -1), 0) >= 0;  // single port side for the selected card
+    const P = [right ? A.r : A.l, cy(A)], S0 = [P[0] + (right ? CG : -CG), P[1]];
+    const xs = new Set([S0[0]]), ys = new Set([P[1]]);
+    groups.forEach(g => { xs.add(g.l - GG); xs.add(g.r + GG); ys.add(g.t - GG); ys.add(g.b + GG); });
+    obs.forEach(o => { if ([...own].some(g => inside(cx(o), cy(o), g))) { xs.add(o.l - CG); xs.add(o.r + CG); ys.add(o.t - CG); ys.add(o.b + CG); } });
+    const ports = rel.map(B => { const fromLeft = cx(B) >= P[0]; const T = [fromLeft ? B.l : B.r, cy(B)]; ys.add(T[1]); xs.add(T[0] + (fromLeft ? -CG : CG)); return { B, T, T0: [T[0] + (fromLeft ? -CG : CG), T[1]], dir: fromLeft ? 0 : 1 }; });
+    const X = [...xs].sort((a, b) => a - b), Y = [...ys].sort((a, b) => a - b), nx = X.length, idx = (i, j) => j * nx + i;
+    // edge weights: dir 0 = +x from node (i,j) to (i+1,j); dir 2 = +y to (i,j+1); Infinity = blocked
+    // per edge: length (Infinity = blocked by a card) and the group block it runs through (-1 = outside)
+    const wH = new Float64Array(nx * Y.length).fill(Infinity), wV = new Float64Array(nx * Y.length).fill(Infinity);
+    const gH = new Int16Array(nx * Y.length), gV = new Int16Array(nx * Y.length);
+    const seg = (p, q, k, W, G) => { if (obs.some(o => hits(p, q, o))) return; W[k] = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]); G[k] = groups.findIndex(g => inside((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, g)); };
+    for (let j = 0; j < Y.length; j++) for (let i = 0; i < nx; i++) {
+      if (i + 1 < nx) seg([X[i], Y[j]], [X[i + 1], Y[j]], idx(i, j), wH, gH);
+      if (j + 1 < Y.length) seg([X[i], Y[j]], [X[i], Y[j + 1]], idx(i, j), wV, gV);
+    }
+    const gOf = c => groups.findIndex(g => inside(cx(c), cy(c), g)), gA = gOf(A);
+    const shared = new Set(); // "H:k" / "V:k" edges already drawn from this port
+    const start = idx(X.indexOf(S0[0]), Y.indexOf(S0[1]));
+    ports.forEach(({ B, T, T0, dir: endDir }) => {
+      const gB = gOf(B); // only the selected card's group and this target's group are cheap to cross
+      const goal = idx(X.indexOf(T0[0]), Y.indexOf(T0[1])), N = nx * Y.length, dist = new Float64Array(N * 4).fill(Infinity), prev = new Int32Array(N * 4).fill(-1), h = [];
+      const s0 = start * 4 + (right ? 0 : 1); dist[s0] = 0; heapPush(h, [0, s0]); let end = -1;
+      while (h.length) {
+        const [d, st] = heapPop(h); if (d > dist[st]) continue; const n = st >> 2, dr = st & 3;
+        if (n === goal) { if (dr === endDir) { end = st; break; } if (end < 0) end = st; continue; } // prefer arriving straight into the port
+        const i = n % nx, j = (n / nx) | 0;
+        for (const [nd, m, k, key] of [[0, i + 1 < nx ? idx(i + 1, j) : -1, n, 'H'], [1, i ? idx(i - 1, j) : -1, i ? idx(i - 1, j) : 0, 'H'], [2, j + 1 < Y.length ? idx(i, j + 1) : -1, n, 'V'], [3, j ? idx(i, j - 1) : -1, j ? idx(i, j - 1) : 0, 'V']]) {
+          if (m < 0) continue; let w = (key === 'H' ? wH : wV)[k]; if (w === Infinity) continue;
+          const g = (key === 'H' ? gH : gV)[k]; if (g >= 0) w *= g === gA || g === gB ? W_OWN : W_OTHER;
+          if (shared.has(key + k)) w *= W_SHARED;
+          const c = d + w + (nd === dr ? 0 : TURN), ns = m * 4 + nd; if (c < dist[ns]) { dist[ns] = c; prev[ns] = st; heapPush(h, [c, ns]); }
+        }
+      }
+      let l;
+      if (end < 0) { l = document.createElementNS(NS, 'line'); l.setAttribute('x1', P[0]); l.setAttribute('y1', P[1]); l.setAttribute('x2', T[0]); l.setAttribute('y2', T[1]); }
+      else {
+        const nodes = []; for (let st = end; st >= 0; st = prev[st]) nodes.push(st >> 2); nodes.reverse();
+        for (let k = 1; k < nodes.length; k++) { const a = nodes[k - 1], b = nodes[k]; const lo = Math.min(a, b); shared.add((Math.abs(a - b) === 1 ? 'H' : 'V') + lo); }
+        const pts = [P, ...nodes.map(n => [X[n % nx], Y[(n / nx) | 0]]), T].filter((p, k, a) => !k || p[0] !== a[k - 1][0] || p[1] !== a[k - 1][1])
+          .filter((p, k, a) => k === 0 || k === a.length - 1 || !((a[k - 1][0] === p[0] && p[0] === a[k + 1][0]) || (a[k - 1][1] === p[1] && p[1] === a[k + 1][1])));
+        l = document.createElementNS(NS, 'polyline'); l.setAttribute('points', pts.map(p => p.join(',')).join(' '));
+      }
       edges.appendChild(l);
     });
   }
